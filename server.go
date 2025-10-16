@@ -1,5 +1,4 @@
 package zaprpc
-
 import (
 	"context"
 	"crypto/rand"
@@ -8,136 +7,272 @@ import (
 	"crypto/x509"
 	"encoding/gob"
 	"encoding/pem"
+	"errors"
 	"fmt"
-	"log"
+	"github.com/quic-go/quic-go"
+	"go.uber.org/zap"
 	"math/big"
 	"net"
 	"reflect"
-
-	"github.com/quic-go/quic-go"
+	"syscall"
+	"time"
 )
 
-type ZapServer struct {
-	services map[string]interface{}
-	listener *quic.Listener
+type Server struct {
+	services map[string]any
+	cfg      *ServerConfig
 }
 
-func NewZapServer() *ZapServer {
-	log.Printf("Made new ZapServer!")
-	return &ZapServer{
-		services: make(map[string]interface{}),
+func NewServer(cfg *ServerConfig) *Server {
+	var serverCfg ServerConfig
+	if cfg != nil {
+		serverCfg = *cfg
 	}
+	if serverCfg.Logger == nil {
+		serverCfg.Logger = zap.NewNop()
+	}
+	if serverCfg.QUICConfig == nil {
+		serverCfg.QUICConfig = &quic.Config{
+			KeepAlivePeriod: 15 * time.Second,
+		}
+	}
+	if serverCfg.TLSConfig == nil {
+		serverCfg.TLSConfig = generateTLSConfig()
+	}
+	server := &Server{
+		services: make(map[string]any),
+		cfg:      &serverCfg,
+	}
+	server.cfg.Logger.Info("Server object created")
+	return server
 }
 
-func (s *ZapServer) RegisterService(name string, service interface{}) {
-	s.services[name] = service
-	log.Printf("Registered service: %v", name)
-}
-
-func (s *ZapServer) Serve(port int, config *ZapConfig) error {
-	udpConn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: port})
+func CreateTransport(addr string, logger *zap.Logger) (*quic.Transport, error) {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	baseAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
+		logger.Error("Invalid UDP address", zap.Error(err))
+		return nil, fmt.Errorf("invalid UDP address %q: %w", addr, err)
+	}
+
+	port := baseAddr.Port
+	if port == 0 {
+		port = 6121
+	}
+
+	const maxRetries = 32
+
+	for i := 0; i < maxRetries; i++ {
+		tryPort := port + i
+		tryAddr := &net.UDPAddr{
+			IP:   baseAddr.IP,
+			Port: tryPort,
+		}
+
+		conn, err := net.ListenUDP("udp", tryAddr)
+		if err == nil {
+			tr := &quic.Transport{Conn: conn}
+
+			logger.Info("Created QUIC transport",
+				zap.String("addr", tryAddr.String()),
+			)
+
+			return tr, nil
+		}
+
+		var opErr *net.OpError
+		if errors.As(err, &opErr) {
+			if errno, ok := opErr.Err.(syscall.Errno); ok && errno == syscall.EADDRINUSE {
+				logger.Warn("Port busy, trying another port", zap.Int("port", tryPort))
+				continue
+			}
+		}
+		return nil, fmt.Errorf("failed to bind UDP %d: %w", tryPort, err)
+	}
+	ephemeral := &net.UDPAddr{IP: baseAddr.IP, Port: 0}
+	udp, err := net.ListenUDP("udp", ephemeral)
+	if err != nil {
+		return nil, fmt.Errorf("failed ephemeral UDP bind: %w", err)
+	}
+	logger.Info("Created QUIC transport (ephemeral)", zap.String("addr", udp.LocalAddr().String()))
+	return &quic.Transport{Conn: udp}, nil
+}
+
+func (s *Server) WithTransport(transport *quic.Transport) *Server {
+
+	if transport != nil {
+		s.cfg.QUICTransport = transport
+	}
+	return s
+}
+func (s *Server) WithQUICConfig(quicConfig *quic.Config) *Server {
+
+	if quicConfig != nil {
+		s.cfg.QUICConfig = quicConfig
+	}
+	return s
+}
+func (s *Server) WithTLSConfig(tlsConfig *tls.Config) *Server {
+	if tlsConfig != nil {
+		s.cfg.TLSConfig = tlsConfig
+	}
+	return s
+}
+func (s *Server) WithLogger(logger *zap.Logger) *Server {
+	if logger != nil {
+		s.cfg.Logger = logger
+	}
+	return s
+}
+
+func (s *Server) RegisterService(name string, service any) {
+	s.services[name] = service
+	s.cfg.Logger.Info("Service added", zap.String("service-name", name))
+}
+
+func (s *Server) Serve(ctx context.Context) error {
+	var (
+		tr           *quic.Transport
+		ln           *quic.Listener
+		err          error
+		ownTransport bool
+	)
+	cfg := s.cfg
+	logger := cfg.Logger
+	if cfg.QUICTransport != nil {
+		tr = cfg.QUICTransport
+	} else {
+		tr, err = CreateTransport(":6121", logger)
+		if err != nil {
+			logger.Error("UDP transport creation error", zap.Error(err))
+			return err
+		}
+		ownTransport = true
+	}
+
+	defer func() {
+		if ownTransport && tr != nil {
+			_ = tr.Close()
+		}
+	}()
+	ln, err = tr.Listen(cfg.TLSConfig, cfg.QUICConfig)
+	if err != nil {
+		logger.Error("Listener failure", zap.Error(err))
 		return err
 	}
-	var tr *quic.Transport
-	if config != nil {
-		config.transportConfig.Conn = udpConn
-		tr = config.transportConfig
+	defer ln.Close()
 
-	} else {
-		tr = &quic.Transport{
-			Conn: udpConn,
-		}
-	}
-	var ln *quic.Listener
-
-	if config != nil {
-		if config.tlsConfig != nil {
-			ln, err = tr.Listen(config.tlsConfig, config.quicConfig)
-			if err != nil {
-				return err
-			}
-		} else {
-			ln, err = tr.Listen(generateTLSConfig(), nil)
-			if err != nil {
-				return err
-			}
-
-		}
-	} else {
-		ln, err = tr.Listen(generateTLSConfig(), nil)
-		if err != nil {
-			return err
-		}
-
-	}
-	s.listener = ln
-	log.Printf("listening on %v", port)
+	logger.Info("Server listening", zap.String("addr", ln.Addr().String()))
 	for {
-		var conn quic.Connection
-		conn, err = ln.Accept(context.Background())
+		conn, err := ln.Accept(ctx)
 		if err != nil {
-			return err
+			switch {
+			case isGracefulClose(err) || ctx.Err() != nil:
+				logger.Info("Server shutting down")
+				return nil
+			case isTimeout(err):
+				logger.Debug("Server timeout", zap.String("details", err.Error()))
+				return nil
+			default:
+				logger.Error("Accept failed", zap.Error(err))
+				return err
+			}
 		}
-		go s.handleSession(conn)
-
+		go s.handleSession(ctx, conn)
 	}
 
 }
 
-func (s *ZapServer) handleSession(conn quic.Connection) {
+func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
+	logger := s.cfg.Logger
+	defer func() { _ = conn.CloseWithError(0, "Server closing") }()
 	for {
-		stream, err := conn.AcceptStream(context.Background())
+		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
-			log.Printf("Error accepting stream: %v", err)
-			return
+			switch {
+
+			case isGracefulClose(err) || ctx.Err() != nil:
+				logger.Info("Session closed", zap.String("details", err.Error()))
+				return
+			case isTimeout(err):
+				logger.Debug("Session timeout", zap.String("details", err.Error()))
+				return
+			default:
+				logger.Error("Error accepting stream", zap.Error(err))
+				return
+			}
 		}
-		go s.handleStream(stream)
+		go s.handleStream(ctx, stream)
 	}
 }
 
-func (s *ZapServer) handleStream(stream quic.Stream) {
+func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
+	logger := s.cfg.Logger
 	defer stream.Close()
-	decoder := gob.NewDecoder(stream)
-	encoder := gob.NewEncoder(stream)
-	for {
-		var request struct {
-			ServiceMethod string
-			Args          []interface{}
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("Stream panic", zap.Any("recover", r), zap.Stack("stack"))
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
 		}
-		err := decoder.Decode(&request)
-		if err != nil {
-			log.Printf("Error decoding request: %v", err)
-			return
+	}()
+	dec := gob.NewDecoder(stream)
+	enc := gob.NewEncoder(stream)
+	var req struct {
+		ServiceMethod string
+		Args          []any
+	}
+	err := dec.Decode(&req)
+	if err != nil {
+		switch {
+		case isGracefulClose(err) || ctx.Err() != nil:
+			logger.Debug("Stream closed by peer", zap.String("details", err.Error()))
+		case isTimeout(err):
+			logger.Debug("Stream timeout", zap.String("details", err.Error()))
+		default:
+			logger.Warn("Decode failed; closing stream", zap.String("details", err.Error()))
 		}
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+		return
+	}
 
-		response, err := s.callMethod(request.ServiceMethod, request.Args)
-		if err != nil {
-			log.Printf("Error calling method: %v", err)
-			encoder.Encode(ZapValue{Value: struct{ Error string }{err.Error()}})
-			continue
-		}
-		err = encoder.Encode(ZapValue{Value: response})
-		if err != nil {
-			log.Printf("Error encoding response: %v", err)
+	resp, err := s.callMethod(req.ServiceMethod, req.Args)
+	if err != nil {
+		logger.Error("Error calling method", zap.Error(err))
+		if e := enc.Encode(ZapResponse{Value:struct{ Error string }{err.Error()}}); e != nil {
+			logger.Error("Error encoding error reply", zap.Error(e))
+			stream.CancelWrite(0)
 			return
 		}
+		return
+	}
+	err = enc.Encode(ZapResponse{Value: resp})
+	if err != nil {
+		logger.Error("Error encoding response", zap.Error(err))
+		stream.CancelWrite(0)
+		return
 	}
 }
 
-func (s *ZapServer) callMethod(serviceMethod string, args []interface{}) (interface{}, error) {
+func (s *Server) callMethod(serviceMethod string, args []any) (any, error) {
 	serviceName, methodName, found := parseServiceMethod(serviceMethod)
 	if !found {
+		s.cfg.Logger.Error("Invalid service method")
 		return nil, fmt.Errorf("invalid service method: %s", serviceMethod)
 	}
 
 	service, ok := s.services[serviceName]
 	if !ok {
+		s.cfg.Logger.Error("Service not found")
 		return nil, fmt.Errorf("service not found: %s", serviceName)
 	}
 
 	method := reflect.ValueOf(service).MethodByName(methodName)
 	if !method.IsValid() {
+		s.cfg.Logger.Error("Method not found")
 		return nil, fmt.Errorf("method not found: %s", methodName)
 	}
 
@@ -201,6 +336,6 @@ func generateTLSConfig() *tls.Config {
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
-		NextProtos:   []string{"new-zap"},
+		NextProtos:   []string{"zaprpc"},
 	}
 }

@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
-	"time"
-
-	zaprpc "github.com/achyuthcodes30/ZapRPC"
+	"sync"
+	zaprpc "github.com/achyuthcodes30/zaprpc"
+	"go.uber.org/zap"
 )
 
 // CalculatorService defines the interface for our calculator service
@@ -38,25 +38,23 @@ func (c *CalculatorServiceImpl) Divide(a, b int) (float64, error) {
 	return float64(a) / float64(b), nil
 }
 
-func clientMain() {
-	CalcConn, _ := zaprpc.NewConn(context.Background(), "localhost:5000", nil)
-	additionResult, _ := zaprpc.Zap(context.Background(), CalcConn, "Calculator.Add", 10, 20)
-	fmt.Println(additionResult)
 
-}
 
 func serverMain() {
-	CalcServer := zaprpc.NewZapServer()
-	CalcServer.RegisterService("Calculator", &CalculatorServiceImpl{})
-	CalcServer.Serve(5000, nil)
-
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+	tr, _ := zaprpc.CreateTransport(":5000", logger)
+	CalcServer := zaprpc.NewServer(&zaprpc.ServerConfig{Logger: logger, QUICTransport: tr})
+	CalcServer.RegisterService("Calculator", new(CalculatorServiceImpl))
+	CalcServer.Serve(context.Background())
 }
 
 func main() {
-	go func() {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func(){
+		defer wg.Done()
 		serverMain()
 	}()
-	time.Sleep(time.Second * 1)
-	clientMain()
-
+	wg.Wait()
 }
