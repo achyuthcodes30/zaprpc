@@ -1,4 +1,5 @@
 package zaprpc
+
 import (
 	"context"
 	"crypto/rand"
@@ -19,11 +20,11 @@ import (
 
 type Server struct {
 	services map[string]any
-	tlsCfg       *tls.Config
-	quicCfg      *quic.Config
-	tr *quic.Transport
-	codec Codec
-	logger *zap.Logger
+	tlsCfg   *tls.Config
+	quicCfg  *quic.Config
+	tr       *quic.Transport
+	codec    Codec
+	logger   *zap.Logger
 }
 
 func NewServer(cfg *ServerConfig) *Server {
@@ -48,11 +49,11 @@ func NewServer(cfg *ServerConfig) *Server {
 	}
 	s := &Server{
 		services: make(map[string]any),
-		tlsCfg: serverCfg.TLSConfig,
-		quicCfg: serverCfg.QUICConfig,
-		tr: serverCfg.QUICTransport,
-		codec: serverCfg.Codec,
-		logger: serverCfg.Logger,
+		tlsCfg:   serverCfg.TLSConfig,
+		quicCfg:  serverCfg.QUICConfig,
+		tr:       serverCfg.QUICTransport,
+		codec:    serverCfg.Codec,
+		logger:   serverCfg.Logger,
 	}
 	s.logger.Info("Server object created")
 	return s
@@ -138,14 +139,14 @@ func (s *Server) WithLogger(logger *zap.Logger) *Server {
 	return s
 }
 
-func (s *Server) WithCodec(codec Codec) *Server{
-	if codec != nil{
+func (s *Server) WithCodec(codec Codec) *Server {
+	if codec != nil {
 		s.codec = codec
 	}
 	return s
 }
 
-func (s *Server) Codec() string{
+func (s *Server) Codec() string {
 	return s.codec.Name()
 }
 
@@ -244,7 +245,7 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 		ServiceMethod string
 		Args          []any
 	}
-	err := codec.Unmarshal(stream,&req)
+	err := codec.Unmarshal(stream, &req)
 	if err != nil {
 		switch {
 		case isGracefulClose(err) || ctx.Err() != nil:
@@ -262,14 +263,14 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 	resp, err := s.callMethod(req.ServiceMethod, req.Args)
 	if err != nil {
 		logger.Error("Error calling method", zap.Error(err))
-		if e := codec.Marshal(stream,ZapResponse{Value:struct{ Error string }{err.Error()}}); e != nil {
+		if e := codec.Marshal(stream, ZapResponse{Value: struct{ Error string }{err.Error()}}); e != nil {
 			logger.Error("Error encoding error reply", zap.Error(e))
 			stream.CancelWrite(0)
 			return
 		}
 		return
 	}
-	err = codec.Marshal(stream,ZapResponse{Value: resp})
+	err = codec.Marshal(stream, ZapResponse{Value: resp})
 	if err != nil {
 		logger.Error("Error encoding response", zap.Error(err))
 		stream.CancelWrite(0)
@@ -278,7 +279,7 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 }
 
 func (s *Server) callMethod(serviceMethod string, args []any) (any, error) {
-	logger := s .logger
+	logger := s.logger
 	serviceName, methodName, found := parseServiceMethod(serviceMethod)
 	if !found {
 		logger.Error("Invalid service method")
@@ -310,7 +311,7 @@ func (s *Server) callMethod(serviceMethod string, args []any) (any, error) {
 			if !lastResult.IsNil() {
 				return nil, lastResult.Interface().(error)
 			}
-			results = results[:len(results)-1] 
+			results = results[:len(results)-1]
 		}
 	}
 
