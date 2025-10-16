@@ -5,7 +5,6 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/gob"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -39,6 +38,10 @@ func NewServer(cfg *ServerConfig) *Server {
 	if serverCfg.TLSConfig == nil {
 		serverCfg.TLSConfig = generateTLSConfig()
 	}
+
+	if serverCfg.Codec == nil {
+		serverCfg.Codec = &GOBCodec{}
+	}
 	server := &Server{
 		services: make(map[string]any),
 		cfg:      &serverCfg,
@@ -47,7 +50,7 @@ func NewServer(cfg *ServerConfig) *Server {
 	return server
 }
 
-func CreateTransport(addr string, logger *zap.Logger) (*quic.Transport, error) {
+func NewTransport(addr string, logger *zap.Logger) (*quic.Transport, error) {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -144,7 +147,7 @@ func (s *Server) Serve(ctx context.Context) error {
 	if cfg.QUICTransport != nil {
 		tr = cfg.QUICTransport
 	} else {
-		tr, err = CreateTransport(":6121", logger)
+		tr, err = NewTransport(":6121", logger)
 		if err != nil {
 			logger.Error("UDP transport creation error", zap.Error(err))
 			return err
@@ -210,6 +213,7 @@ func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
 
 func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 	logger := s.cfg.Logger
+	codec := s.cfg.Codec
 	defer stream.Close()
 	defer func() {
 		if r := recover(); r != nil {
@@ -218,13 +222,11 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 			stream.CancelWrite(0)
 		}
 	}()
-	dec := gob.NewDecoder(stream)
-	enc := gob.NewEncoder(stream)
 	var req struct {
 		ServiceMethod string
 		Args          []any
 	}
-	err := dec.Decode(&req)
+	err := codec.Unmarshal(stream,&req)
 	if err != nil {
 		switch {
 		case isGracefulClose(err) || ctx.Err() != nil:
@@ -242,14 +244,14 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 	resp, err := s.callMethod(req.ServiceMethod, req.Args)
 	if err != nil {
 		logger.Error("Error calling method", zap.Error(err))
-		if e := enc.Encode(ZapResponse{Value:struct{ Error string }{err.Error()}}); e != nil {
+		if e := codec.Marshal(stream,ZapResponse{Value:struct{ Error string }{err.Error()}}); e != nil {
 			logger.Error("Error encoding error reply", zap.Error(e))
 			stream.CancelWrite(0)
 			return
 		}
 		return
 	}
-	err = enc.Encode(ZapResponse{Value: resp})
+	err = codec.Marshal(stream,ZapResponse{Value: resp})
 	if err != nil {
 		logger.Error("Error encoding response", zap.Error(err))
 		stream.CancelWrite(0)

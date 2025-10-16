@@ -12,11 +12,17 @@ type ServerConfig struct {
 	TLSConfig       *tls.Config
 	QUICConfig      *quic.Config
 	QUICTransport *quic.Transport
+	Codec Codec
 	Logger *zap.Logger
+
 }
 
 type ClientConfig struct {
+	Codec Codec
+	Logger *zap.Logger
+}
+
+type ConnectionConfig struct {
 	TLSConfig       *tls.Config
 	QUICConfig      *quic.Config
-	Logger *zap.Logger
 }

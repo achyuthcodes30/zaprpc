@@ -3,15 +3,42 @@ package zaprpc
 import (
 	"context"
 	"crypto/tls"
-	"encoding/gob"
 	"fmt"
 	"github.com/quic-go/quic-go"
 	"net"
 	"time"
 	"errors"
+	"go.uber.org/zap"
 )
 
-func NewConn(ctx context.Context, target string, cfg *ClientConfig) (quic.Connection, error) {
+
+type Client struct{
+	Codec Codec
+	Logger *zap.Logger
+}
+
+func NewClient(cfg *ClientConfig) *Client{
+
+	var clientCfg ClientConfig
+	if cfg != nil {
+		clientCfg = *cfg
+	}
+	if clientCfg.Logger == nil {
+		clientCfg.Logger = zap.NewNop()
+	}
+
+	if clientCfg.Codec == nil {
+		clientCfg.Codec = &GOBCodec{}
+	}
+	c := &Client{
+		Logger: clientCfg.Logger,
+		Codec: clientCfg.Codec,
+	}
+	c.Logger.Info("Client object created")
+	return c
+}
+
+func NewConn(ctx context.Context, target string, cfg *ConnectionConfig) (quic.Connection, error) {
 	if target == "" {
 		return nil, fmt.Errorf("empty target")
 	}
@@ -19,12 +46,12 @@ func NewConn(ctx context.Context, target string, cfg *ClientConfig) (quic.Connec
 	if err != nil {
 		return nil, fmt.Errorf("invalid target %q: %w", target, err)
 	}
-	var clientCfg ClientConfig
+	var connectionCfg ConnectionConfig
 	if cfg != nil {
-		clientCfg = *cfg
+		connectionCfg = *cfg
 	}
-	if clientCfg.TLSConfig == nil {
-		clientCfg.TLSConfig = &tls.Config{
+	if connectionCfg.TLSConfig == nil {
+		connectionCfg.TLSConfig = &tls.Config{
 			MinVersion:         tls.VersionTLS13,
 			ServerName:         host,
 			InsecureSkipVerify: false,
@@ -32,13 +59,13 @@ func NewConn(ctx context.Context, target string, cfg *ClientConfig) (quic.Connec
 		}
 	}
 
-	if clientCfg.QUICConfig == nil {
-		clientCfg.QUICConfig = &quic.Config{
+	if connectionCfg.QUICConfig == nil {
+		connectionCfg.QUICConfig = &quic.Config{
 			KeepAlivePeriod: 15 * time.Second,
 		}
 	}
 
-	conn, err := quic.DialAddr(ctx, target, clientCfg.TLSConfig, clientCfg.QUICConfig)
+	conn, err := quic.DialAddr(ctx, target, connectionCfg.TLSConfig, connectionCfg.QUICConfig)
 	if err != nil {
 
 		return nil, fmt.Errorf("failed to dial: %w", err)
@@ -46,14 +73,14 @@ func NewConn(ctx context.Context, target string, cfg *ClientConfig) (quic.Connec
 	return conn, nil
 }
 
-func Zap(conn quic.Connection, serviceMethod string, args ...any) (any, error) {
+func (c *Client) Zap(ctx context.Context, conn quic.Connection, serviceMethod string, args ...any) (any, error) {
+	codec := c .Codec
+	// logger := c.Logger
 	stream, err := conn.OpenStream()
 	if err != nil {
 		return nil, fmt.Errorf("failed to open stream: %w", err)
 	}
 	defer stream.Close()
-	dec := gob.NewDecoder(stream)
-	enc := gob.NewEncoder(stream)
 	req := struct {
 		ServiceMethod string
 		Args          []any
@@ -62,19 +89,19 @@ func Zap(conn quic.Connection, serviceMethod string, args ...any) (any, error) {
 		Args:          args,
 	}
 
-	err = enc.Encode(req)
+	err = codec.Marshal(stream,req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
-	var response ZapResponse
-	err = dec.Decode(&response)
+	var resp ZapResponse
+	err = codec.Unmarshal(stream, &resp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	if err, ok := response.Value.(struct{ Error string }); ok && err.Error != "" {
+	if err, ok := resp.Value.(struct{ Error string }); ok && err.Error != "" {
 		return nil, errors.New(err.Error)
 	}
 
-	return response.Value, nil
+	return resp.Value, nil
 }
 

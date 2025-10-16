@@ -8,13 +8,15 @@ import (
 )
 
 func clientMain() {
-	CalcConn, _ := zaprpc.NewConn(context.Background(), "localhost:5000", &zaprpc.ClientConfig{
+	client := zaprpc.NewClient(nil)
+	CalcConn, _ := zaprpc.NewConn(context.Background(), "localhost:5000", &zaprpc.ConnectionConfig{
 		TLSConfig: &tls.Config{
 			InsecureSkipVerify: true,
 			NextProtos: []string{"zaprpc"},
 		},
 	})
-	additionResult, err := zaprpc.Zap(CalcConn, "Calculator.Add", 10, 20)
+	
+	additionResult, err := client.Zap(context.Background(),CalcConn, "Calculator.Add", 10, 20)
 	fmt.Printf("Result is %d\n",additionResult)
 	fmt.Printf("Errors: %v",err)
 }
