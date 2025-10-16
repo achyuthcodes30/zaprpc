@@ -42,6 +42,7 @@ func (c *CalculatorServiceImpl) Divide(a, b int) (float64, error) {
 
 func serverMain() {
 	logger, _ := zap.NewDevelopment()
+	logger = logger.Named("zaprpc-server")
 	defer logger.Sync()
 	tr, _ := zaprpc.NewTransport(":5000", logger)
 	CalcServer := zaprpc.NewServer(&zaprpc.ServerConfig{Logger: logger, QUICTransport: tr})

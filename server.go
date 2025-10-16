@@ -19,7 +19,11 @@ import (
 
 type Server struct {
 	services map[string]any
-	cfg      *ServerConfig
+	tlsCfg       *tls.Config
+	quicCfg      *quic.Config
+	tr *quic.Transport
+	codec Codec
+	logger *zap.Logger
 }
 
 func NewServer(cfg *ServerConfig) *Server {
@@ -42,12 +46,16 @@ func NewServer(cfg *ServerConfig) *Server {
 	if serverCfg.Codec == nil {
 		serverCfg.Codec = &GOBCodec{}
 	}
-	server := &Server{
+	s := &Server{
 		services: make(map[string]any),
-		cfg:      &serverCfg,
+		tlsCfg: serverCfg.TLSConfig,
+		quicCfg: serverCfg.QUICConfig,
+		tr: serverCfg.QUICTransport,
+		codec: serverCfg.Codec,
+		logger: serverCfg.Logger,
 	}
-	server.cfg.Logger.Info("Server object created")
-	return server
+	s.logger.Info("Server object created")
+	return s
 }
 
 func NewTransport(addr string, logger *zap.Logger) (*quic.Transport, error) {
@@ -106,33 +114,44 @@ func NewTransport(addr string, logger *zap.Logger) (*quic.Transport, error) {
 func (s *Server) WithTransport(transport *quic.Transport) *Server {
 
 	if transport != nil {
-		s.cfg.QUICTransport = transport
+		s.tr = transport
 	}
 	return s
 }
 func (s *Server) WithQUICConfig(quicConfig *quic.Config) *Server {
 
 	if quicConfig != nil {
-		s.cfg.QUICConfig = quicConfig
+		s.quicCfg = quicConfig
 	}
 	return s
 }
 func (s *Server) WithTLSConfig(tlsConfig *tls.Config) *Server {
 	if tlsConfig != nil {
-		s.cfg.TLSConfig = tlsConfig
+		s.tlsCfg = tlsConfig
 	}
 	return s
 }
 func (s *Server) WithLogger(logger *zap.Logger) *Server {
 	if logger != nil {
-		s.cfg.Logger = logger
+		s.logger = logger
 	}
 	return s
 }
 
+func (s *Server) WithCodec(codec Codec) *Server{
+	if codec != nil{
+		s.codec = codec
+	}
+	return s
+}
+
+func (s *Server) Codec() string{
+	return s.codec.Name()
+}
+
 func (s *Server) RegisterService(name string, service any) {
 	s.services[name] = service
-	s.cfg.Logger.Info("Service added", zap.String("service-name", name))
+	s.logger.Info("Service added", zap.String("service-name", name))
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -142,10 +161,9 @@ func (s *Server) Serve(ctx context.Context) error {
 		err          error
 		ownTransport bool
 	)
-	cfg := s.cfg
-	logger := cfg.Logger
-	if cfg.QUICTransport != nil {
-		tr = cfg.QUICTransport
+	logger := s.logger
+	if s.tr != nil {
+		tr = s.tr
 	} else {
 		tr, err = NewTransport(":6121", logger)
 		if err != nil {
@@ -160,7 +178,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			_ = tr.Close()
 		}
 	}()
-	ln, err = tr.Listen(cfg.TLSConfig, cfg.QUICConfig)
+	ln, err = tr.Listen(s.tlsCfg, s.quicCfg)
 	if err != nil {
 		logger.Error("Listener failure", zap.Error(err))
 		return err
@@ -189,7 +207,7 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
-	logger := s.cfg.Logger
+	logger := s.logger
 	defer func() { _ = conn.CloseWithError(0, "Server closing") }()
 	for {
 		stream, err := conn.AcceptStream(ctx)
@@ -212,8 +230,8 @@ func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
 }
 
 func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
-	logger := s.cfg.Logger
-	codec := s.cfg.Codec
+	logger := s.logger
+	codec := s.codec
 	defer stream.Close()
 	defer func() {
 		if r := recover(); r != nil {
@@ -260,21 +278,22 @@ func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
 }
 
 func (s *Server) callMethod(serviceMethod string, args []any) (any, error) {
+	logger := s .logger
 	serviceName, methodName, found := parseServiceMethod(serviceMethod)
 	if !found {
-		s.cfg.Logger.Error("Invalid service method")
+		logger.Error("Invalid service method")
 		return nil, fmt.Errorf("invalid service method: %s", serviceMethod)
 	}
 
 	service, ok := s.services[serviceName]
 	if !ok {
-		s.cfg.Logger.Error("Service not found")
+		logger.Error("Service not found")
 		return nil, fmt.Errorf("service not found: %s", serviceName)
 	}
 
 	method := reflect.ValueOf(service).MethodByName(methodName)
 	if !method.IsValid() {
-		s.cfg.Logger.Error("Method not found")
+		logger.Error("Method not found")
 		return nil, fmt.Errorf("method not found: %s", methodName)
 	}
 
@@ -285,23 +304,20 @@ func (s *Server) callMethod(serviceMethod string, args []any) (any, error) {
 
 	results := method.Call(reflectArgs)
 
-	// If the method returns an error, it should be the last return value
 	if len(results) > 0 {
 		lastResult := results[len(results)-1]
 		if lastResult.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
 			if !lastResult.IsNil() {
 				return nil, lastResult.Interface().(error)
 			}
-			results = results[:len(results)-1] // Remove the error from results
+			results = results[:len(results)-1] 
 		}
 	}
 
-	// If there's only one result (excluding a potential error), return it directly
 	if len(results) == 1 {
 		return results[0].Interface(), nil
 	}
 
-	// If there are multiple results, return them as a slice
 	response := make([]interface{}, len(results))
 	for i, result := range results {
 		response[i] = result.Interface()

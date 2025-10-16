@@ -5,10 +5,15 @@ import (
 	"crypto/tls"
 	"fmt"
 	zaprpc "github.com/achyuthcodes30/zaprpc"
+	"go.uber.org/zap"
 )
 
 func clientMain() {
-	client := zaprpc.NewClient(nil)
+	logger, _ := zap.NewDevelopment()
+	defer logger.Sync()
+	client := zaprpc.NewClient(&zaprpc.ClientConfig{
+		Logger: logger.Named("zaprpc-client"),
+	})
 	CalcConn, _ := zaprpc.NewConn(context.Background(), "localhost:5000", &zaprpc.ConnectionConfig{
 		TLSConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -16,7 +21,7 @@ func clientMain() {
 		},
 	})
 	
-	additionResult, err := client.Zap(context.Background(),CalcConn, "Calculator.Add", 10, 20)
+	additionResult, err := client.Zap(CalcConn, "Calculator.Add", 10, 20)
 	fmt.Printf("Result is %d\n",additionResult)
 	fmt.Printf("Errors: %v",err)
 }

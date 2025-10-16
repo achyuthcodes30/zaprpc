@@ -3,21 +3,20 @@ package zaprpc
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"github.com/quic-go/quic-go"
+	"go.uber.org/zap"
 	"net"
 	"time"
-	"errors"
-	"go.uber.org/zap"
 )
 
-
-type Client struct{
-	Codec Codec
-	Logger *zap.Logger
+type Client struct {
+	codec  Codec
+	logger *zap.Logger
 }
 
-func NewClient(cfg *ClientConfig) *Client{
+func NewClient(cfg *ClientConfig) *Client {
 
 	var clientCfg ClientConfig
 	if cfg != nil {
@@ -31,10 +30,10 @@ func NewClient(cfg *ClientConfig) *Client{
 		clientCfg.Codec = &GOBCodec{}
 	}
 	c := &Client{
-		Logger: clientCfg.Logger,
-		Codec: clientCfg.Codec,
+		logger: clientCfg.Logger,
+		codec:  clientCfg.Codec,
 	}
-	c.Logger.Info("Client object created")
+	c.logger.Info("Client object created")
 	return c
 }
 
@@ -72,12 +71,30 @@ func NewConn(ctx context.Context, target string, cfg *ConnectionConfig) (quic.Co
 	}
 	return conn, nil
 }
+func (c *Client) WithLogger(logger *zap.Logger) *Client {
+	if logger != nil {
+		c.logger = logger
+	}
+	return c
+}
 
-func (c *Client) Zap(ctx context.Context, conn quic.Connection, serviceMethod string, args ...any) (any, error) {
-	codec := c .Codec
-	// logger := c.Logger
+func (c *Client) WithCodec(codec Codec) *Client {
+	if codec != nil {
+		c.codec = codec
+	}
+	return c
+}
+
+func (c *Client) Codec() string {
+	return c.codec.Name()
+}
+
+func (c *Client) Zap(conn quic.Connection, serviceMethod string, args ...any) (any, error) {
+	codec := c.codec
+	logger := c.logger
 	stream, err := conn.OpenStream()
 	if err != nil {
+		logger.Debug("Failed to open stream", zap.String("details", err.Error()))
 		return nil, fmt.Errorf("failed to open stream: %w", err)
 	}
 	defer stream.Close()
@@ -89,13 +106,15 @@ func (c *Client) Zap(ctx context.Context, conn quic.Connection, serviceMethod st
 		Args:          args,
 	}
 
-	err = codec.Marshal(stream,req)
+	err = codec.Marshal(stream, req)
 	if err != nil {
+		logger.Debug("Error encoding request", zap.String("details", err.Error()))
 		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
 	var resp ZapResponse
 	err = codec.Unmarshal(stream, &resp)
 	if err != nil {
+		logger.Debug("Error decoding response", zap.String("details", err.Error()))
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 	if err, ok := resp.Value.(struct{ Error string }); ok && err.Error != "" {
@@ -104,4 +123,3 @@ func (c *Client) Zap(ctx context.Context, conn quic.Connection, serviceMethod st
 
 	return resp.Value, nil
 }
-
