@@ -207,7 +207,7 @@ func (s *Server) Serve(ctx context.Context) error {
 
 }
 
-func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
+func (s *Server) handleSession(ctx context.Context, conn *quic.Conn) {
 	logger := s.logger
 	defer func() { _ = conn.CloseWithError(0, "Server closing") }()
 	for {
@@ -230,7 +230,7 @@ func (s *Server) handleSession(ctx context.Context, conn quic.Connection) {
 	}
 }
 
-func (s *Server) handleStream(ctx context.Context, stream quic.Stream) {
+func (s *Server) handleStream(ctx context.Context, stream *quic.Stream) {
 	logger := s.logger
 	codec := s.codec
 	defer stream.Close()

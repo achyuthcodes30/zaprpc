@@ -37,7 +37,7 @@ func NewClient(cfg *ClientConfig) *Client {
 	return c
 }
 
-func NewConn(ctx context.Context, target string, cfg *ConnectionConfig) (quic.Connection, error) {
+func NewConn(ctx context.Context, target string, cfg *ConnectionConfig) (*quic.Conn, error) {
 	if target == "" {
 		return nil, fmt.Errorf("empty target")
 	}
@@ -89,7 +89,7 @@ func (c *Client) Codec() string {
 	return c.codec.Name()
 }
 
-func (c *Client) Zap(conn quic.Connection, serviceMethod string, args ...any) (any, error) {
+func (c *Client) Zap(conn *quic.Conn, serviceMethod string, args ...any) (any, error) {
 	codec := c.codec
 	logger := c.logger
 	stream, err := conn.OpenStream()
